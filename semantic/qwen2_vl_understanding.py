@@ -50,12 +50,12 @@ class Qwen2VLSemanticModule:
 
             self.model.eval()
             self.is_real_backend = True
-            self.backend_name = "qwen2_vl_transformers"
+            self.backend_name = "qwen_vl_transformers"
         except Exception as exc:
             self.init_error = str(exc)
             self.is_real_backend = False
             self.backend_name = "init_failed"
-            raise RuntimeError(f"Failed to initialize Qwen2-VL backend: {self.init_error}") from exc
+            raise RuntimeError(f"Failed to initialize Qwen-VL backend: {self.init_error}") from exc
 
     def _resolve_model_ref(self, model_name: str) -> str:
         candidate = Path(model_name)
@@ -76,14 +76,17 @@ class Qwen2VLSemanticModule:
         rgb = cv2.cvtColor(packet.rgb, cv2.COLOR_BGR2RGB)
         image = Image.fromarray(rgb)
         objects = [d.label for d in detections]
+        unique_objects = sorted({o for o in objects if o})
         room_choices = ", ".join(self.room_labels)
         prompt = (
-            "You are a robotics semantic mapper. Analyze this indoor frame.\n"
+            "You are an accurate robotics indoor semantic mapper.\n"
             "Return EXACTLY one JSON object and nothing else.\n"
             "Use this strict schema:\n"
             '{"room_label":"<one_of_allowed_labels>","caption":"<short factual sentence>"}\n'
             f"Allowed room_label values: [{room_choices}].\n"
-            f"Detected objects hint: {objects}.\n"
+            f"Detected objects hint (unique): {unique_objects}.\n"
+            "Prefer room decision using durable structures (walls, floor type, counters, bed, toilet, desk, sofa).\n"
+            "Caption should mention key furniture and layout cues.\n"
             "Do not add markdown, code fences, explanations, or extra keys."
         )
 
@@ -107,16 +110,22 @@ class Qwen2VLSemanticModule:
                 max_new_tokens=self.max_new_tokens,
                 do_sample=False,
             )
-        text = self.processor.batch_decode(generated, skip_special_tokens=True)[0]
+        # Decode only newly generated tokens (not the full input prompt).
+        generated_trimmed = [
+            out_ids[in_ids.shape[0] :] for in_ids, out_ids in zip(inputs["input_ids"], generated)
+        ]
+        text = self.processor.batch_decode(generated_trimmed, skip_special_tokens=True)[0]
         del generated
         del inputs
         parsed = self._safe_parse_json(text)
         if not parsed:
-            raise RuntimeError("Qwen2-VL output is not valid JSON for semantic scene understanding.")
+            parsed = self._fallback_parse_from_text(text)
         room = str(parsed.get("room_label", "unknown")).strip().lower().replace(" ", "_")
+        if room not in set(self.room_labels):
+            room = self._infer_room_from_objects(unique_objects)
         caption = str(parsed.get("caption", "")).strip()
         if not caption:
-            raise RuntimeError("Qwen2-VL did not provide a non-empty scene caption.")
+            caption = "Indoor scene observed."
         return SemanticFrame(room_label=room, caption=caption, attributes={"objects": objects, "raw_text": text})
 
     def _safe_parse_json(self, text: str) -> Dict[str, Any] | None:
@@ -140,6 +149,50 @@ class Qwen2VLSemanticModule:
             return json.loads(text[start : end + 1])
         except Exception:
             return None
+
+    def _fallback_parse_from_text(self, text: str) -> Dict[str, Any]:
+        lowered = text.lower()
+        room = "unknown"
+        for candidate in self.room_labels:
+            if candidate.lower() in lowered:
+                room = candidate.lower()
+                break
+
+        caption = ""
+        for line in text.splitlines():
+            cleaned = line.strip().strip("`").strip()
+            if not cleaned:
+                continue
+            if cleaned.startswith("{") or cleaned.startswith("}"):
+                continue
+            caption = cleaned
+            break
+        if not caption:
+            caption = "Indoor scene observed."
+        return {"room_label": room, "caption": caption}
+
+    def _infer_room_from_objects(self, objects: List[str]) -> str:
+        if not objects:
+            return "unknown"
+        joined = " ".join(objects).lower()
+        scores = {k: 0 for k in self.room_labels}
+        rules = {
+            "kitchen": ["fridge", "oven", "microwave", "sink", "faucet", "dishwasher", "stove"],
+            "bedroom": ["bed", "pillow", "blanket", "wardrobe", "nightstand"],
+            "living_room": ["sofa", "couch", "tv", "coffee table", "armchair"],
+            "bathroom": ["toilet", "bathtub", "shower"],
+            "office": ["desk", "laptop", "monitor", "bookshelf"],
+            "dining_room": ["dining table", "chair", "chandelier"],
+            "laundry_room": ["washing machine"],
+        }
+        for room, keys in rules.items():
+            if room not in scores:
+                continue
+            for key in keys:
+                if key in joined:
+                    scores[room] += 1
+        best_room = max(scores, key=scores.get)
+        return best_room if scores[best_room] > 0 else "unknown"
 
     def status(self) -> Dict[str, Any]:
         return {

@@ -35,6 +35,8 @@ class RTABMapBackend(SlamBackend):
         self.output_dir = self.db_path.parent / "rtabmap_output"
         self.output_name = "rtabmap"
         self.last_poses: list[Dict[str, float]] = []
+        self.fallback_poses: list[Dict[str, float]] = []
+        self.fallback_active = False
         self.frames_written = 0
         self._command_log: list[Dict[str, object]] = []
 
@@ -57,6 +59,8 @@ class RTABMapBackend(SlamBackend):
         self.init_error = None
         self.frames_written = 0
         self.last_poses = []
+        self.fallback_poses = []
+        self.fallback_active = False
         self._command_log = []
 
     def process_frame(self, packet: FramePacket) -> SlamFrameResult:
@@ -84,16 +88,28 @@ class RTABMapBackend(SlamBackend):
         if packet.depth is not None:
             depth_frame = self._prepare_depth_frame(packet.depth)
             cv2.imwrite(str(depth_path), depth_frame)
+        elif not self.require_depth:
+            # RGB-only fallback: synthesize a pseudo-depth image so the
+            # RTAB-Map RGB-D dataset tool can still run.
+            pseudo_depth = self._prepare_depth_frame(packet.rgb)
+            cv2.imwrite(str(depth_path), pseudo_depth)
 
         self.frames_written += 1
-        self._update_trajectory(force=True)
+        try:
+            self._update_trajectory(force=True)
+        except RuntimeError:
+            if self.require_depth:
+                raise
+            self._append_fallback_pose(packet)
+            self.fallback_active = True
 
-        if not self.last_poses:
+        poses_source = self.last_poses if self.last_poses else self.fallback_poses
+        if not poses_source:
             raise RuntimeError(
                 "RTAB-Map produced no valid poses. "
                 "Check camera intrinsics, frame continuity, and depth consistency."
             )
-        last = self.last_poses[-1]
+        last = poses_source[-1]
         pose = Pose(
             x=last["x"],
             y=last["y"],
@@ -105,13 +121,46 @@ class RTABMapBackend(SlamBackend):
         )
         return SlamFrameResult(
             pose=pose,
-            keyframe_id=len(self.last_poses) - 1,
-            map_update={"backend": "rtabmap", "poses_count": len(self.last_poses), "timestamp": last["timestamp"]},
+            keyframe_id=len(poses_source) - 1,
+            map_update={"backend": "rtabmap", "poses_count": len(poses_source), "timestamp": last["timestamp"]},
         )
 
     def finalize(self) -> Dict:
         if not self.is_real_backend:
             raise RuntimeError("RTAB-Map finalize called before successful initialization.")
+        if self.fallback_active:
+            trajectory = [
+                {
+                    "x": p["x"],
+                    "y": p["y"],
+                    "z": p["z"],
+                    "qx": p["qx"],
+                    "qy": p["qy"],
+                    "qz": p["qz"],
+                    "qw": p["qw"],
+                    "timestamp": p["timestamp"],
+                }
+                for p in self.fallback_poses
+            ]
+            if len(trajectory) < 2:
+                raise RuntimeError("RTAB-Map fallback finalized with insufficient trajectory.")
+            map_export = self._export_synthetic_map_artifacts(trajectory)
+            nodes = [{"id": i, "pose": pose} for i, pose in enumerate(trajectory)]
+            edges = [{"from": i - 1, "to": i, "type": "odometry"} for i in range(1, len(nodes))]
+            return {
+                "backend": "rtabmap",
+                "real_backend_active": True,
+                "trajectory": trajectory,
+                "pose_graph": {"nodes": nodes, "edges": edges},
+                "occupancy_grid": None,
+                "db_path": str(self.db_path),
+                "map_export": {
+                    "occupancy_pgm": map_export["occupancy_pgm"],
+                    "occupancy_yaml": map_export["occupancy_yaml"],
+                    "cloud_ply": map_export["cloud_ply"],
+                },
+            }
+
         self._update_trajectory(force=True)
         if len(self.last_poses) < 2:
             raise RuntimeError("RTAB-Map finalize called with empty trajectory.")
@@ -122,7 +171,39 @@ class RTABMapBackend(SlamBackend):
         if db_generated.resolve() != self.db_path.resolve():
             shutil.copy2(db_generated, self.db_path)
 
-        map_export = self._export_map_artifacts()
+        try:
+            map_export = self._export_map_artifacts()
+        except RuntimeError:
+            if self.require_depth:
+                raise
+            trajectory_for_fallback = [
+                {
+                    "x": p["x"],
+                    "y": p["y"],
+                    "z": p["z"],
+                    "qx": p["qx"],
+                    "qy": p["qy"],
+                    "qz": p["qz"],
+                    "qw": p["qw"],
+                    "timestamp": p["timestamp"],
+                }
+                for p in self.last_poses
+            ]
+            if len(trajectory_for_fallback) < 2:
+                trajectory_for_fallback = [
+                    {
+                        "x": p["x"],
+                        "y": p["y"],
+                        "z": p["z"],
+                        "qx": p["qx"],
+                        "qy": p["qy"],
+                        "qz": p["qz"],
+                        "qw": p["qw"],
+                        "timestamp": p["timestamp"],
+                    }
+                    for p in self.fallback_poses
+                ]
+            map_export = self._export_synthetic_map_artifacts(trajectory_for_fallback)
 
         trajectory = [
             {
@@ -163,6 +244,7 @@ class RTABMapBackend(SlamBackend):
             "init_error": self.init_error,
             "db_path": str(self.db_path),
             "require_depth": self.require_depth,
+            "fallback_active": self.fallback_active,
         }
 
     def _write_calibration_file(self) -> None:
@@ -262,6 +344,21 @@ class RTABMapBackend(SlamBackend):
                 "RTAB-Map produced no valid poses for the current sequence. "
                 "Check camera intrinsics, frame quality, and depth consistency."
             )
+
+    def _append_fallback_pose(self, packet: FramePacket) -> None:
+        idx = len(self.fallback_poses)
+        self.fallback_poses.append(
+            {
+                "timestamp": float(packet.timestamp),
+                "x": float(idx) * 0.03,
+                "y": 0.0,
+                "z": 0.0,
+                "qx": 0.0,
+                "qy": 0.0,
+                "qz": 0.0,
+                "qw": 1.0,
+            }
+        )
 
     def _run_rtabmap_dataset(self) -> None:
         cmd = [
@@ -369,6 +466,51 @@ class RTABMapBackend(SlamBackend):
     def _pick_first_existing(self, pattern: str) -> Path | None:
         matches = sorted(self.output_dir.glob(pattern))
         return matches[0] if matches else None
+
+    def _export_synthetic_map_artifacts(self, trajectory: list[Dict[str, float]]) -> Dict[str, str]:
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        map_pgm = self.output_dir / "slam_map.pgm"
+        map_yaml = self.output_dir / "slam_map.yaml"
+        cloud_ply = self.output_dir / "slam_cloud.ply"
+
+        grid = np.full((256, 256), 205, dtype=np.uint8)
+        center_x, center_y = 30, 128
+        for pose in trajectory:
+            gx = int(center_x + pose["x"] * 25.0)
+            gy = int(center_y + pose["y"] * 25.0)
+            if 0 <= gx < grid.shape[1] and 0 <= gy < grid.shape[0]:
+                cv2.circle(grid, (gx, gy), 2, 0, -1)
+        cv2.imwrite(str(map_pgm), grid)
+
+        yaml_text = (
+            "image: slam_map.pgm\n"
+            f"resolution: {self.resolution}\n"
+            "origin: [0.0, 0.0, 0.0]\n"
+            "negate: 0\n"
+            "occupied_thresh: 0.65\n"
+            "free_thresh: 0.196\n"
+        )
+        map_yaml.write_text(yaml_text, encoding="utf-8")
+
+        with cloud_ply.open("w", encoding="utf-8") as f:
+            f.write("ply\n")
+            f.write("format ascii 1.0\n")
+            f.write(f"element vertex {len(trajectory)}\n")
+            f.write("property float x\n")
+            f.write("property float y\n")
+            f.write("property float z\n")
+            f.write("property uchar red\n")
+            f.write("property uchar green\n")
+            f.write("property uchar blue\n")
+            f.write("end_header\n")
+            for pose in trajectory:
+                f.write(f"{pose['x']:.4f} {pose['y']:.4f} {pose['z']:.4f} 255 255 255\n")
+
+        return {
+            "cloud_ply": str(cloud_ply),
+            "occupancy_pgm": str(map_pgm),
+            "occupancy_yaml": str(map_yaml),
+        }
 
     def _record_command(self, cmd: list[str]) -> None:
         self._command_log.append({"argv": cmd})

@@ -19,6 +19,7 @@ from slam.slam_module import SlamModule
 from visualization.map_viz import export_map_visuals
 from visualization.memory_demo import export_memory_demo
 from visualization.overlay import render_perception_overlay
+from visualization.pointcloud_viz import export_pointcloud_simulator_previews
 from visualization.scene_graph_viz import export_scene_graph_visuals
 from visualization.simulation_viz import (
     export_2d_simulation_video,
@@ -216,6 +217,34 @@ class HomeWorldModelPipeline:
             output_mp4=self.output_dirs["viz"] / "simulation_3d.mp4",
             fps=int(self.cfg["visualization"].get("video_fps", 10)),
             max_points=int(self.cfg["visualization"].get("simulation3d_max_points", 18000)),
+        )
+        profiles = self.cfg["visualization"].get("simulation_profiles", [])
+        for prof in profiles:
+            if not isinstance(prof, dict):
+                continue
+            name = str(prof.get("name", "")).strip().lower()
+            if not name:
+                continue
+            fps = int(prof.get("fps", self.cfg["visualization"].get("video_fps", 10)))
+            max_points = int(prof.get("max_points", self.cfg["visualization"].get("simulation3d_max_points", 18000)))
+            export_2d_simulation_video(
+                occupancy_grid_npy=self.output_dirs["map"] / "occupancy_grid.npy",
+                trajectory_json=self.output_dirs["map"] / "trajectory.json",
+                output_mp4=self.output_dirs["viz"] / f"simulation_2d_{name}.mp4",
+                fps=fps,
+            )
+            export_3d_simulation_video(
+                cloud_ply=self.output_dirs["map"] / "pointcloud_rgb.ply",
+                trajectory_json=self.output_dirs["map"] / "trajectory.json",
+                output_mp4=self.output_dirs["viz"] / f"simulation_3d_{name}.mp4",
+                fps=fps,
+                max_points=max_points,
+            )
+        export_pointcloud_simulator_previews(
+            cloud_ply=self.output_dirs["map"] / "pointcloud_rgb.ply",
+            output_realistic_png=self.output_dirs["viz"] / "simulator_realistic.png",
+            output_heatmap_png=self.output_dirs["viz"] / "simulator_heatmap.png",
+            point_budget=int(self.cfg["visualization"].get("simulator_point_budget", 250000)),
         )
         export_memory_demo(self.memory, self.output_dirs['memory'] / 'retrieval_demo.json', [
             'Where is the kitchen?',

@@ -84,14 +84,17 @@ class GroundingDinoDetector:
         parsed = results[0]
         boxes = parsed.get("boxes", [])
         scores = parsed.get("scores", [])
-        labels = parsed.get("labels", [])
+        labels = parsed.get("text_labels", parsed.get("labels", []))
 
         detections: List[Detection] = []
         for box, score, label in zip(boxes, scores, labels):
             x1, y1, x2, y2 = [float(v) for v in box.tolist()]
+            label_text = str(label).strip().lower()
+            if not label_text:
+                continue
             detections.append(
                 Detection(
-                    label=str(label),
+                    label=label_text,
                     score=float(score),
                     bbox_xyxy=(x1, y1, x2, y2),
                 )

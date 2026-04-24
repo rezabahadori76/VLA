@@ -23,6 +23,22 @@ This downloads and prepares:
 - SAM checkpoint (`sam_vit_h_4b8939.pth`)
 - Qwen2-VL (`Qwen/Qwen2-VL-2B-Instruct`)
 
+## One-shot Portable Bootstrap (new machine)
+
+Run this once on a fresh Ubuntu/Debian machine:
+
+```bash
+cd VLA
+bash scripts/bootstrap_everything.sh
+```
+
+What it sets up automatically:
+- System dependencies (`apt`) + RTAB-Map build tools
+- RTAB-Map executables in `third_party/rtabmap/build/bin/`
+- Python virtualenv in `.venv` + pip packages
+- All model downloads into `models/`
+- Ready-to-run config at `config/local_cpu_portable.yaml`
+
 ## Backend Health Check
 
 ```bash

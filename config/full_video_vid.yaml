@@ -1,8 +1,8 @@
 system:
   run_name: phase1_home_world_model
   device: cuda
-  max_frames: 8
-  frame_stride: 20
+  max_frames: 834
+  frame_stride: 3
   strict_real_models: true
 slam:
   backend: rtabmap
@@ -10,12 +10,12 @@ slam:
   require_depth: true
   map_resolution: 0.05
   camera_intrinsics:
-    width: 1920
-    height: 1080
-    fx: 1000.0
-    fy: 1000.0
-    cx: 960.0
-    cy: 540.0
+    width: 720
+    height: 1280
+    fx: 1280.0
+    fy: 1280.0
+    cx: 360.0
+    cy: 640.0
   rtabmap:
     executable: /workspace/phase1/third_party/rtabmap/build/bin/rtabmap-rgbd_dataset
     db_path: outputs/rtabmap.db
@@ -39,7 +39,7 @@ semantic:
   model_name: models/qwen2_vl_2b
   use_real_model: true
   device: cuda
-  max_new_tokens: 120
+  max_new_tokens: 24
   room_labels:
   - kitchen
   - bedroom
@@ -60,3 +60,5 @@ visualization:
   draw_boxes: true
   export_graph_png: true
   pointcloud_sample_step: 24
+  video_fps: 10
+  simulation3d_max_points: 18000

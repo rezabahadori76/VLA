@@ -30,20 +30,14 @@ class EmbeddingProvider:
         return self._dim
 
     def initialize(self) -> None:
-        try:
-            from sentence_transformers import SentenceTransformer
-            self._model = SentenceTransformer(self.model_name)
-            self._dim = int(self._model.get_sentence_embedding_dimension())
-        except Exception:
-            self._model = None
-            self._dim = 384
+        from sentence_transformers import SentenceTransformer
+
+        self._model = SentenceTransformer(self.model_name)
+        self._dim = int(self._model.get_sentence_embedding_dimension())
 
     def encode(self, texts: List[str]) -> np.ndarray:
         if self._model is None:
-            vecs = np.zeros((len(texts), self._dim), dtype=np.float32)
-            for i, txt in enumerate(texts):
-                vecs[i, abs(hash(txt)) % self._dim] = 1.0
-            return vecs
+            raise RuntimeError("Embedding model is not initialized.")
         arr = self._model.encode(texts, normalize_embeddings=True)
         return np.asarray(arr, dtype=np.float32)
 
@@ -57,11 +51,9 @@ class FaissMemoryStore:
 
     def initialize(self) -> None:
         self.embedder.initialize()
-        try:
-            import faiss
-            self.index = faiss.IndexFlatIP(self.embedder.dim)
-        except Exception:
-            self.index = None
+        import faiss
+
+        self.index = faiss.IndexFlatIP(self.embedder.dim)
 
     def add_state(self, state: FrameWorldState) -> None:
         rec = MemoryRecord(
@@ -73,8 +65,9 @@ class FaissMemoryStore:
         )
         self.records.append(rec)
         vec = self.embedder.encode([self._record_text(rec)])
-        if self.index is not None:
-            self.index.add(vec)
+        if self.index is None:
+            raise RuntimeError("FAISS index is not initialized.")
+        self.index.add(vec)
 
     def query(self, text: str, top_k: int | None = None) -> List[Dict[str, Any]]:
         k = top_k or self.top_k
@@ -82,18 +75,14 @@ class FaissMemoryStore:
             return []
         q = self.embedder.encode([text])
 
-        if self.index is not None:
-            scores, idxs = self.index.search(q, min(k, len(self.records)))
-            out = []
-            for score, idx in zip(scores[0], idxs[0]):
-                if idx >= 0:
-                    out.append({"score": float(score), "record": self.records[int(idx)].__dict__})
-            return out
-
-        mat = self.embedder.encode([self._record_text(r) for r in self.records])
-        sims = (mat @ q[0]).tolist()
-        order = np.argsort(sims)[::-1][:k]
-        return [{"score": float(sims[i]), "record": self.records[int(i)].__dict__} for i in order]
+        if self.index is None:
+            raise RuntimeError("FAISS index is not initialized.")
+        scores, idxs = self.index.search(q, min(k, len(self.records)))
+        out = []
+        for score, idx in zip(scores[0], idxs[0]):
+            if idx >= 0:
+                out.append({"score": float(score), "record": self.records[int(idx)].__dict__})
+        return out
 
     def export_metadata(self, out_path: Path) -> None:
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -110,8 +99,8 @@ class FaissMemoryStore:
     def status(self) -> Dict[str, Any]:
         return {
             "module": "memory",
-            "backend": "faiss" if self.index is not None else "numpy_fallback",
-            "real_backend_active": self.index is not None,
+            "backend": "faiss" if self.index is not None else "unavailable",
+            "real_backend_active": self.index is not None and self.embedder._model is not None,
             "embedding_model": self.embedder.model_name,
             "embedding_dim": self.embedder.dim,
         }

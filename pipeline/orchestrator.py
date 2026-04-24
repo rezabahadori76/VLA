@@ -3,7 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List
 
+import cv2
 import numpy as np
+from tqdm import tqdm
 
 from common.logging_utils import JsonlLogger, to_jsonable
 from common.types import FrameWorldState
@@ -18,6 +20,11 @@ from visualization.map_viz import export_map_visuals
 from visualization.memory_demo import export_memory_demo
 from visualization.overlay import render_perception_overlay
 from visualization.scene_graph_viz import export_scene_graph_visuals
+from visualization.simulation_viz import (
+    export_2d_simulation_video,
+    export_3d_simulation_video,
+    export_overlay_video,
+)
 
 
 class HomeWorldModelPipeline:
@@ -35,6 +42,9 @@ class HomeWorldModelPipeline:
         self.states: List[FrameWorldState] = []
 
     def initialize(self) -> None:
+        frame_stride = int(self.cfg["system"].get("frame_stride", 1))
+        if frame_stride < 1:
+            raise RuntimeError("frame_stride must be >= 1.")
         self.slam.initialize()
         self.detector.initialize()
         self.segmenter.initialize()
@@ -59,20 +69,30 @@ class HomeWorldModelPipeline:
         self.logger.log('pipeline_initialized', {'ok': True, 'backend_status': backend_status})
 
     def run(self, video_path: Path, depth_video_path: Path | None = None) -> Dict[str, Any]:
+        max_frames = int(self.cfg["system"].get("max_frames", 300))
+        frame_stride = int(self.cfg["system"].get("frame_stride", 1))
         packets = iter_video_frames(
             video_path=video_path,
             depth_video_path=depth_video_path,
-            frame_stride=int(self.cfg['system'].get('frame_stride', 1)),
-            max_frames=int(self.cfg['system'].get('max_frames', 300)),
+            frame_stride=frame_stride,
+            max_frames=max_frames,
             save_rgb_dir=self.output_dirs['frames'],
             intrinsics=self.cfg["slam"].get("camera_intrinsics"),
         )
 
+        total_frames_in_video = self._read_total_video_frames(video_path)
+        expected_processed = max_frames
+        if total_frames_in_video is not None:
+            expected_processed = min(max_frames, (total_frames_in_video + frame_stride - 1) // frame_stride)
+
+        progress = tqdm(total=expected_processed, desc="Phase1 frames", unit="frame", dynamic_ncols=True)
         for packet in packets:
             slam_result = self.slam.process_frame(packet)
             detections = self.detector.detect(packet)
             segments = self.segmenter.segment(packet, detections)
             semantics = self.semantic.infer(packet, detections)
+            if "raw_text" not in semantics.attributes:
+                raise RuntimeError("Semantic output is not model-derived (missing raw_text from VLM response).")
             state = FrameWorldState(
                 frame_id=packet.frame_id,
                 timestamp=packet.timestamp,
@@ -85,6 +105,12 @@ class HomeWorldModelPipeline:
             self.memory.add_state(state)
             self._export_frame(packet.frame_id, state)
             self.logger.log('frame_processed', to_jsonable(state))
+            processed = packet.frame_id + 1
+            remaining = max(expected_processed - processed, 0)
+            progress.update(1)
+            progress.set_postfix_str(f"processed={processed} remaining={remaining}")
+
+        progress.close()
 
         slam_summary = self.slam.finalize()
         scene_graph = self.scene_graph_builder.build(self.states)
@@ -94,6 +120,14 @@ class HomeWorldModelPipeline:
         self.logger.log('pipeline_completed', {'frames': len(self.states)})
 
         return {'frames': len(self.states), 'scene_graph_nodes': len(scene_graph.nodes), 'scene_graph_edges': len(scene_graph.edges)}
+
+    def _read_total_video_frames(self, video_path: Path) -> int | None:
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            return None
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
+        return total if total > 0 else None
 
     def _export_frame(self, frame_id: int, state: FrameWorldState) -> None:
         write_json(self.output_dirs['detections'] / f'frame_{frame_id:06d}.json', {'detections': to_jsonable(state.detections)})
@@ -138,6 +172,24 @@ class HomeWorldModelPipeline:
             scene_graph_path=self.output_dirs['scene_graph'] / 'scene_graph.json',
             output_png=self.output_dirs['viz'] / 'scene_graph.png',
             enabled=bool(self.cfg['visualization'].get('export_graph_png', True)),
+        )
+        export_overlay_video(
+            overlays_dir=self.output_dirs["viz"] / "overlays",
+            output_mp4=self.output_dirs["viz"] / "overlay_preview.mp4",
+            fps=int(self.cfg["visualization"].get("video_fps", 10)),
+        )
+        export_2d_simulation_video(
+            occupancy_grid_npy=self.output_dirs["map"] / "occupancy_grid.npy",
+            trajectory_json=self.output_dirs["map"] / "trajectory.json",
+            output_mp4=self.output_dirs["viz"] / "simulation_2d.mp4",
+            fps=int(self.cfg["visualization"].get("video_fps", 10)),
+        )
+        export_3d_simulation_video(
+            cloud_ply=self.output_dirs["map"] / "pointcloud_rgb.ply",
+            trajectory_json=self.output_dirs["map"] / "trajectory.json",
+            output_mp4=self.output_dirs["viz"] / "simulation_3d.mp4",
+            fps=int(self.cfg["visualization"].get("video_fps", 10)),
+            max_points=int(self.cfg["visualization"].get("simulation3d_max_points", 18000)),
         )
         export_memory_demo(self.memory, self.output_dirs['memory'] / 'retrieval_demo.json', [
             'Where is the kitchen?',

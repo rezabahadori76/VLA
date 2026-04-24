@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Dict, List
 
 import cv2
@@ -30,8 +31,7 @@ class Qwen2VLSemanticModule:
 
     def initialize(self) -> None:
         if not self.use_real_model:
-            self.backend_name = "fallback_disabled_by_config"
-            return
+            raise RuntimeError("Semantic module requires a real VLM backend. Fallback mode is disabled.")
         try:
             from transformers import AutoModelForImageTextToText, AutoProcessor
 
@@ -54,7 +54,8 @@ class Qwen2VLSemanticModule:
         except Exception as exc:
             self.init_error = str(exc)
             self.is_real_backend = False
-            self.backend_name = "fallback_init_failed"
+            self.backend_name = "init_failed"
+            raise RuntimeError(f"Failed to initialize Qwen2-VL backend: {self.init_error}") from exc
 
     def _resolve_model_ref(self, model_name: str) -> str:
         candidate = Path(model_name)
@@ -67,69 +68,76 @@ class Qwen2VLSemanticModule:
         return model_name
 
     def infer(self, packet: FramePacket, detections: List[Detection]) -> SemanticFrame:
-        if self.is_real_backend and self.model is not None and self.processor is not None:
-            real = self._infer_real(packet, detections)
-            if real is not None:
-                return real
+        if not (self.is_real_backend and self.model is not None and self.processor is not None):
+            raise RuntimeError("Semantic backend is unavailable. Fallback mode is disabled.")
+        return self._infer_real(packet, detections)
 
-        labels = [d.label for d in detections]
-        room = self._infer_room(labels)
-        caption = self._caption(room, labels)
-        return SemanticFrame(room_label=room, caption=caption, attributes={"objects": labels})
-
-    def _infer_real(self, packet: FramePacket, detections: List[Detection]) -> SemanticFrame | None:
+    def _infer_real(self, packet: FramePacket, detections: List[Detection]) -> SemanticFrame:
         rgb = cv2.cvtColor(packet.rgb, cv2.COLOR_BGR2RGB)
         image = Image.fromarray(rgb)
         objects = [d.label for d in detections]
         room_choices = ", ".join(self.room_labels)
         prompt = (
-            "You are a robotics semantic mapper. Analyze this indoor frame and answer strictly in JSON with keys "
-            "'room_label' and 'caption'. "
-            f"Choose room_label from: {room_choices}. "
-            f"Detected objects hint: {objects}."
+            "You are a robotics semantic mapper. Analyze this indoor frame.\n"
+            "Return EXACTLY one JSON object and nothing else.\n"
+            "Use this strict schema:\n"
+            '{"room_label":"<one_of_allowed_labels>","caption":"<short factual sentence>"}\n'
+            f"Allowed room_label values: [{room_choices}].\n"
+            f"Detected objects hint: {objects}.\n"
+            "Do not add markdown, code fences, explanations, or extra keys."
         )
 
-        try:
-            inputs = self.processor(images=image, text=prompt, return_tensors="pt")
-            if self.device == "cuda" and torch.cuda.is_available():
-                inputs = {k: v.to("cuda") for k, v in inputs.items()}
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": image},
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ]
+        text_prompt = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        inputs = self.processor(text=[text_prompt], images=[image], return_tensors="pt")
+        if self.device == "cuda" and torch.cuda.is_available():
+            inputs = {k: v.to("cuda") for k, v in inputs.items()}
 
-            with torch.no_grad():
-                generated = self.model.generate(**inputs, max_new_tokens=self.max_new_tokens)
-            text = self.processor.batch_decode(generated, skip_special_tokens=True)[0]
-            parsed = self._safe_parse_json(text)
-            if not parsed:
-                return None
-            room = str(parsed.get("room_label", "unknown")).strip().lower().replace(" ", "_")
-            caption = str(parsed.get("caption", "")).strip() or self._caption(room, objects)
-            return SemanticFrame(room_label=room, caption=caption, attributes={"objects": objects, "raw_text": text})
-        except Exception:
-            return None
+        with torch.no_grad():
+            generated = self.model.generate(
+                **inputs,
+                max_new_tokens=self.max_new_tokens,
+                do_sample=False,
+            )
+        text = self.processor.batch_decode(generated, skip_special_tokens=True)[0]
+        parsed = self._safe_parse_json(text)
+        if not parsed:
+            raise RuntimeError("Qwen2-VL output is not valid JSON for semantic scene understanding.")
+        room = str(parsed.get("room_label", "unknown")).strip().lower().replace(" ", "_")
+        caption = str(parsed.get("caption", "")).strip()
+        if not caption:
+            raise RuntimeError("Qwen2-VL did not provide a non-empty scene caption.")
+        return SemanticFrame(room_label=room, caption=caption, attributes={"objects": objects, "raw_text": text})
 
     def _safe_parse_json(self, text: str) -> Dict[str, Any] | None:
         start = text.find("{")
         end = text.rfind("}")
         if start == -1 or end == -1 or end <= start:
+            lowered = text.lower()
+            room = None
+            for candidate in self.room_labels:
+                if candidate.lower() in lowered:
+                    room = candidate.lower()
+                    break
+            caption = None
+            m = re.search(r"caption\s*[:=]\s*['\"]?(.+?)['\"]?(?:\n|$)", text, flags=re.IGNORECASE)
+            if m:
+                caption = m.group(1).strip()
+            if room and caption:
+                return {"room_label": room, "caption": caption}
             return None
         try:
             return json.loads(text[start : end + 1])
         except Exception:
             return None
-
-    def _infer_room(self, labels: List[str]) -> str:
-        s = set(labels)
-        if {"fridge", "sink"} & s:
-            return "kitchen"
-        if {"bed"} & s:
-            return "bedroom"
-        if {"sofa"} & s:
-            return "living_room"
-        return self.room_labels[0] if self.room_labels else "unknown"
-
-    def _caption(self, room: str, labels: List[str]) -> str:
-        if labels:
-            return f"A {room} scene containing: {', '.join(labels)}."
-        return f"An indoor {room} scene with no confident object detections."
 
     def status(self) -> Dict[str, Any]:
         return {

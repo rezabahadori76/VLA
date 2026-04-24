@@ -39,8 +39,7 @@ class SAMSegmenter:
 
     def initialize(self) -> None:
         if not self.use_real_model:
-            self.backend_name = "fallback_disabled_by_config"
-            return
+            raise RuntimeError("Segmentation module requires a real model. Fallback mode is disabled.")
         try:
             from segment_anything import SamPredictor, sam_model_registry
 
@@ -54,7 +53,8 @@ class SAMSegmenter:
         except Exception as exc:
             self.init_error = str(exc)
             self.is_real_backend = False
-            self.backend_name = "fallback_init_failed"
+            self.backend_name = "init_failed"
+            raise RuntimeError(f"Failed to initialize SAM backend: {self.init_error}") from exc
 
     def _resolve_checkpoint(self, checkpoint_path: str) -> str:
         candidate = Path(checkpoint_path)
@@ -67,9 +67,9 @@ class SAMSegmenter:
         return checkpoint_path
 
     def segment(self, packet: FramePacket, detections: List[Detection]) -> List[SegmentationMask]:
-        if self.is_real_backend and self.predictor is not None:
-            return self._segment_real(packet, detections)
-        return self._segment_fallback(packet, detections)
+        if not (self.is_real_backend and self.predictor is not None):
+            raise RuntimeError("Segmentation backend is unavailable. Fallback mode is disabled.")
+        return self._segment_real(packet, detections)
 
     def _segment_real(self, packet: FramePacket, detections: List[Detection]) -> List[SegmentationMask]:
         rgb = cv2.cvtColor(packet.rgb, cv2.COLOR_BGR2RGB)
@@ -89,23 +89,6 @@ class SAMSegmenter:
                 SegmentationMask(
                     label=det.label,
                     score=float(scores[0]),
-                    mask_rle=_binary_mask_to_rle(mask),
-                    bbox_xyxy=det.bbox_xyxy,
-                )
-            )
-        return outputs
-
-    def _segment_fallback(self, packet: FramePacket, detections: List[Detection]) -> List[SegmentationMask]:
-        h, w = packet.rgb.shape[:2]
-        outputs: List[SegmentationMask] = []
-        for det in detections:
-            x1, y1, x2, y2 = map(int, det.bbox_xyxy)
-            mask = np.zeros((h, w), dtype=np.uint8)
-            mask[max(0, y1):min(h, y2), max(0, x1):min(w, x2)] = 1
-            outputs.append(
-                SegmentationMask(
-                    label=det.label,
-                    score=det.score,
                     mask_rle=_binary_mask_to_rle(mask),
                     bbox_xyxy=det.bbox_xyxy,
                 )

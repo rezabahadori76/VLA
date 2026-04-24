@@ -27,8 +27,8 @@ detection:
   model_name: models/grounding_dino_tiny
   use_real_model: true
   device: cuda
-  box_threshold: 0.3
-  text_threshold: 0.25
+  box_threshold: 0.45
+  text_threshold: 0.35
   prompt: chair . table . door . bed . sofa . fridge . sink . cabinet . lamp
 segmentation:
   model_type: vit_h

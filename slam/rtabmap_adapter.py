@@ -35,8 +35,6 @@ class RTABMapBackend(SlamBackend):
         self.output_name = "rtabmap"
         self.last_poses: list[Dict[str, float]] = []
         self.frames_written = 0
-        self.update_interval_frames = 30
-        self.last_update_frame_count = 0
 
     def initialize(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -56,7 +54,6 @@ class RTABMapBackend(SlamBackend):
         self.is_real_backend = True
         self.init_error = None
         self.frames_written = 0
-        self.last_update_frame_count = 0
         self.last_poses = []
 
     def process_frame(self, packet: FramePacket) -> SlamFrameResult:
@@ -86,7 +83,7 @@ class RTABMapBackend(SlamBackend):
             cv2.imwrite(str(depth_path), depth_frame)
 
         self.frames_written += 1
-        self._maybe_update_trajectory()
+        self._update_trajectory(force=True)
 
         if not self.last_poses:
             raise RuntimeError(
@@ -249,19 +246,11 @@ class RTABMapBackend(SlamBackend):
             }
         )
 
-    def _maybe_update_trajectory(self) -> None:
-        if self.frames_written == 1:
-            self._update_trajectory(force=True)
-            return
-        if self.frames_written - self.last_update_frame_count >= self.update_interval_frames:
-            self._update_trajectory(force=False)
-
     def _update_trajectory(self, force: bool) -> None:
         self._run_rtabmap_dataset()
         poses = self._load_poses_file()
         if poses:
             self.last_poses = poses
-            self.last_update_frame_count = self.frames_written
             return
         if force:
             raise RuntimeError(
@@ -282,6 +271,12 @@ class RTABMapBackend(SlamBackend):
             "0",
             "--RGBD/AngularUpdate",
             "0",
+            "--Grid/FromDepth",
+            "true",
+            "--Grid/3D",
+            "false",
+            "--Grid/CellSize",
+            str(self.resolution),
             "--Vis/MinInliers",
             "10",
             str(self.sequence_dir),
@@ -367,12 +362,12 @@ class RTABMapBackend(SlamBackend):
     def _build_occupancy_from_cloud(self, cloud_file: Path) -> tuple[Path, Path]:
         points = []
         with cloud_file.open("r", encoding="utf-8") as f:
-            header_ended = False
+            in_data = False
             for raw in f:
                 line = raw.strip()
-                if not header_ended:
+                if not in_data:
                     if line == "end_header":
-                        header_ended = True
+                        in_data = True
                     continue
                 if not line:
                     continue
@@ -386,27 +381,22 @@ class RTABMapBackend(SlamBackend):
                     continue
                 if np.isfinite(x) and np.isfinite(z):
                     points.append((x, z))
+
         if not points:
-            raise RuntimeError("Could not build occupancy map: exported cloud has no valid points.")
+            raise RuntimeError("Cannot build occupancy map from cloud: no valid points found.")
 
         pts = np.asarray(points, dtype=np.float32)
         min_x, min_z = pts.min(axis=0)
         max_x, max_z = pts.max(axis=0)
-        range_x = float(max_x - min_x)
-        range_z = float(max_z - min_z)
-        res = max(float(self.resolution), 1e-4)
-        if range_x > 0.0 and range_z > 0.0:
-            target_cells = 96.0
-            adaptive_res = max(range_x / target_cells, range_z / target_cells, 1e-4)
-            res = min(res, adaptive_res)
-        width = int(np.ceil((max_x - min_x) / res)) + 1
-        height = int(np.ceil((max_z - min_z) / res)) + 1
-        width = max(width, 32)
-        height = max(height, 32)
+        res = max(float(self.resolution), 1e-3)
+        width = max(int(np.ceil((max_x - min_x) / res)) + 1, 32)
+        height = max(int(np.ceil((max_z - min_z) / res)) + 1, 32)
+
         grid = np.full((height, width), 205, dtype=np.uint8)
         ix = np.clip(((pts[:, 0] - min_x) / res).astype(np.int32), 0, width - 1)
         iz = np.clip(((pts[:, 1] - min_z) / res).astype(np.int32), 0, height - 1)
         grid[height - 1 - iz, ix] = 0
+
         occ = (grid == 0).astype(np.uint8)
         occ = cv2.dilate(occ, np.ones((3, 3), dtype=np.uint8), iterations=1)
         grid[occ > 0] = 0

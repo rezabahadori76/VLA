@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 import cv2
-import numpy as np
 import torch
 from pathlib import Path
 
@@ -28,8 +27,7 @@ class GroundingDinoDetector:
 
     def initialize(self) -> None:
         if not self.use_real_model:
-            self.backend_name = "fallback_disabled_by_config"
-            return
+            raise RuntimeError("Detection module requires a real model. Fallback mode is disabled.")
 
         try:
             from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
@@ -49,7 +47,8 @@ class GroundingDinoDetector:
         except Exception as exc:
             self.init_error = str(exc)
             self.is_real_backend = False
-            self.backend_name = "fallback_init_failed"
+            self.backend_name = "init_failed"
+            raise RuntimeError(f"Failed to initialize Grounding DINO backend: {self.init_error}") from exc
 
     def _resolve_model_ref(self, model_name: str) -> str:
         candidate = Path(model_name)
@@ -62,9 +61,9 @@ class GroundingDinoDetector:
         return model_name
 
     def detect(self, packet: FramePacket) -> List[Detection]:
-        if self.is_real_backend and self.model is not None and self.processor is not None:
-            return self._detect_real(packet)
-        return self._detect_fallback(packet)
+        if not (self.is_real_backend and self.model is not None and self.processor is not None):
+            raise RuntimeError("Detection backend is unavailable. Fallback mode is disabled.")
+        return self._detect_real(packet)
 
     def _detect_real(self, packet: FramePacket) -> List[Detection]:
         rgb = cv2.cvtColor(packet.rgb, cv2.COLOR_BGR2RGB)
@@ -96,26 +95,6 @@ class GroundingDinoDetector:
                     score=float(score),
                     bbox_xyxy=(x1, y1, x2, y2),
                 )
-            )
-        return detections
-
-    def _detect_fallback(self, packet: FramePacket) -> List[Detection]:
-        h, w = packet.rgb.shape[:2]
-        if not self.labels:
-            return []
-
-        rng = np.random.default_rng(seed=packet.frame_id)
-        n = min(3, len(self.labels))
-        detections: List[Detection] = []
-        for idx in range(n):
-            x1 = float(rng.integers(0, max(1, int(w * 0.6))))
-            y1 = float(rng.integers(0, max(1, int(h * 0.6))))
-            bw = float(rng.integers(max(10, int(w * 0.1)), max(20, int(w * 0.3))))
-            bh = float(rng.integers(max(10, int(h * 0.1)), max(20, int(h * 0.3))))
-            x2 = min(float(w - 1), x1 + bw)
-            y2 = min(float(h - 1), y1 + bh)
-            detections.append(
-                Detection(label=self.labels[idx], score=0.55 + 0.1 * idx, bbox_xyxy=(x1, y1, x2, y2))
             )
         return detections
 

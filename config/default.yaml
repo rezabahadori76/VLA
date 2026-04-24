@@ -1,12 +1,11 @@
 system:
-  run_name: "phase1_home_world_model"
-  device: "cuda"
+  run_name: phase1_home_world_model
+  device: cuda
   max_frames: 300
   frame_stride: 3
   strict_real_models: false
-
 slam:
-  backend: "rtabmap"
+  backend: rtabmap
   use_depth: true
   require_depth: true
   map_resolution: 0.05
@@ -18,45 +17,48 @@ slam:
     cx: 960.0
     cy: 540.0
   rtabmap:
-    executable: "/workspace/phase1/third_party/rtabmap/build/bin/rtabmap-rgbd_dataset"
-    db_path: "outputs/rtabmap.db"
+    executable: /workspace/phase1/third_party/rtabmap/build/bin/rtabmap-rgbd_dataset
+    db_path: outputs/rtabmap.db
   orbslam3:
-    executable: "./ORB_SLAM3/Examples/Monocular/mono_tum"
-    vocabulary_path: "./ORB_SLAM3/Vocabulary/ORBvoc.txt"
-    settings_path: "./ORB_SLAM3/Examples/Monocular/TUM1.yaml"
-
+    executable: ./ORB_SLAM3/Examples/Monocular/mono_tum
+    vocabulary_path: ./ORB_SLAM3/Vocabulary/ORBvoc.txt
+    settings_path: ./ORB_SLAM3/Examples/Monocular/TUM1.yaml
 detection:
-  model_name: "models/grounding_dino_tiny"
+  model_name: models/grounding_dino_tiny
   use_real_model: true
-  device: "cuda"
-  box_threshold: 0.30
-  text_threshold: 0.25
-  prompt: "chair . table . door . bed . sofa . fridge . sink . cabinet . lamp"
-
+  device: cuda
+  box_threshold: 0.45
+  text_threshold: 0.35
+  prompt: chair . table . door . bed . sofa . fridge . sink . cabinet . lamp
 segmentation:
-  model_type: "vit_h"
-  checkpoint: "models/sam/sam_vit_h_4b8939.pth"
+  model_type: vit_h
+  checkpoint: models/sam/sam_vit_h_4b8939.pth
   use_real_model: true
-  device: "cuda"
-
+  device: cuda
 semantic:
-  model_name: "models/qwen2_vl_2b"
+  model_name: models/qwen2_vl_2b
   use_real_model: true
-  device: "cuda"
+  device: cuda
   max_new_tokens: 120
-  room_labels: ["kitchen", "bedroom", "living_room", "bathroom", "hallway", "office", "dining_room"]
-
+  room_labels:
+  - kitchen
+  - bedroom
+  - living_room
+  - bathroom
+  - hallway
+  - office
+  - dining_room
 scene_graph:
   include_room_nodes: true
   relation_threshold_px: 60
-
 memory:
-  backend: "faiss"
-  embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
+  backend: faiss
+  embedding_model: sentence-transformers/all-MiniLM-L6-v2
   top_k: 5
-
 visualization:
   draw_masks: true
   draw_boxes: true
   export_graph_png: true
   pointcloud_sample_step: 24
+  video_fps: 10
+  simulation3d_max_points: 18000

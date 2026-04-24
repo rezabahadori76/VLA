@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Logs / temp
+*.log
+*.tmp
+*.swp
+
+# Heavy project assets
+models/
+data/
+outputs/
+tmp/
+
+# Local build/runtime artifacts
+third_party/rtabmap/build/
+third_party/rtabmap/install/
+third_party/rtabmap/
+
+# Large media files
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.webp
+
+# Model/map artifacts
+*.pth
+*.pt
+*.onnx
+*.bin
+*.safetensors
+*.ckpt
+*.h5
+*.npy
+*.npz
+*.faiss
+*.db
+*.ply
+*.pcd

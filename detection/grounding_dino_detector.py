@@ -1,12 +1,22 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from dataclasses import dataclass
+from typing import Any, Dict, List, Tuple
 
 import cv2
 import torch
 from pathlib import Path
 
 from common.types import Detection, FramePacket
+
+
+@dataclass
+class _TrackedDetection:
+    label: str
+    bbox_xyxy: Tuple[float, float, float, float]
+    score: float
+    hits: int
+    missed: int
 
 
 class GroundingDinoDetector:
@@ -18,12 +28,21 @@ class GroundingDinoDetector:
         self.labels = [x.strip() for x in self.prompt.split('.') if x.strip()]
         self.device = cfg.get("device", "cuda")
         self.use_real_model = bool(cfg.get("use_real_model", True))
+        self.stabilization_enabled = bool(cfg.get("stabilization_enabled", True))
+        self.track_iou_threshold = float(cfg.get("track_iou_threshold", 0.45))
+        self.track_smoothing_alpha = float(cfg.get("track_smoothing_alpha", 0.65))
+        self.track_min_hits = max(1, int(cfg.get("track_min_hits", 2)))
+        self.track_max_missed = max(0, int(cfg.get("track_max_missed", 3)))
+        self.track_score_decay = float(cfg.get("track_score_decay", 0.92))
+        self.track_min_score = float(cfg.get("track_min_score", 0.2))
 
         self.processor = None
         self.model = None
         self.is_real_backend = False
         self.backend_name = "fallback"
         self.init_error: str | None = None
+        self._tracks: Dict[int, _TrackedDetection] = {}
+        self._next_track_id = 1
 
     def initialize(self) -> None:
         if not self.use_real_model:
@@ -101,7 +120,103 @@ class GroundingDinoDetector:
             )
         del outputs
         del inputs
-        return detections
+        if not self.stabilization_enabled:
+            return detections
+        return self._stabilize_detections(detections)
+
+    def _stabilize_detections(self, detections: List[Detection]) -> List[Detection]:
+        unmatched_track_ids = set(self._tracks.keys())
+        unmatched_detection_indices = set(range(len(detections)))
+
+        # Greedy one-to-one assignment by IoU for same-label detections.
+        match_candidates: List[Tuple[float, int, int]] = []
+        for det_idx, det in enumerate(detections):
+            for track_id, track in self._tracks.items():
+                if det.label != track.label:
+                    continue
+                iou = self._bbox_iou(det.bbox_xyxy, track.bbox_xyxy)
+                if iou >= self.track_iou_threshold:
+                    match_candidates.append((iou, det_idx, track_id))
+        match_candidates.sort(reverse=True, key=lambda x: x[0])
+
+        for _, det_idx, track_id in match_candidates:
+            if det_idx not in unmatched_detection_indices or track_id not in unmatched_track_ids:
+                continue
+            det = detections[det_idx]
+            track = self._tracks[track_id]
+            track.bbox_xyxy = self._smooth_bbox(track.bbox_xyxy, det.bbox_xyxy, self.track_smoothing_alpha)
+            track.score = max(det.score, track.score * self.track_score_decay)
+            track.hits += 1
+            track.missed = 0
+            unmatched_detection_indices.remove(det_idx)
+            unmatched_track_ids.remove(track_id)
+
+        # New tracks for unmatched detections.
+        for det_idx in unmatched_detection_indices:
+            det = detections[det_idx]
+            self._tracks[self._next_track_id] = _TrackedDetection(
+                label=det.label,
+                bbox_xyxy=det.bbox_xyxy,
+                score=det.score,
+                hits=1,
+                missed=0,
+            )
+            self._next_track_id += 1
+
+        # Age out unmatched tracks, but keep for a few frames to reduce flicker.
+        for track_id in list(unmatched_track_ids):
+            track = self._tracks[track_id]
+            track.missed += 1
+            track.score *= self.track_score_decay
+            if track.missed > self.track_max_missed or track.score < self.track_min_score:
+                del self._tracks[track_id]
+
+        stabilized: List[Detection] = []
+        for track in self._tracks.values():
+            if track.hits < self.track_min_hits:
+                continue
+            stabilized.append(
+                Detection(
+                    label=track.label,
+                    score=track.score,
+                    bbox_xyxy=track.bbox_xyxy,
+                )
+            )
+        return stabilized
+
+    @staticmethod
+    def _smooth_bbox(
+        prev_bbox: Tuple[float, float, float, float],
+        new_bbox: Tuple[float, float, float, float],
+        alpha: float,
+    ) -> Tuple[float, float, float, float]:
+        return tuple(
+            float(alpha * prev_v + (1.0 - alpha) * new_v)
+            for prev_v, new_v in zip(prev_bbox, new_bbox)
+        )
+
+    @staticmethod
+    def _bbox_iou(
+        box_a: Tuple[float, float, float, float],
+        box_b: Tuple[float, float, float, float],
+    ) -> float:
+        ax1, ay1, ax2, ay2 = box_a
+        bx1, by1, bx2, by2 = box_b
+        inter_x1 = max(ax1, bx1)
+        inter_y1 = max(ay1, by1)
+        inter_x2 = min(ax2, bx2)
+        inter_y2 = min(ay2, by2)
+        inter_w = max(0.0, inter_x2 - inter_x1)
+        inter_h = max(0.0, inter_y2 - inter_y1)
+        inter_area = inter_w * inter_h
+        if inter_area <= 0.0:
+            return 0.0
+        area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+        area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+        union = area_a + area_b - inter_area
+        if union <= 0.0:
+            return 0.0
+        return inter_area / union
 
     def status(self) -> Dict[str, Any]:
         return {

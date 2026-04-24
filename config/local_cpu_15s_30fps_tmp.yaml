@@ -1,14 +1,14 @@
 system:
-  run_name: phase1_home_world_model
-  device: cuda
-  max_frames: 300
-  frame_stride: 3
+  run_name: phase1_15s_30fps_cpu
+  device: cpu
+  max_frames: 450
+  frame_stride: 1
   strict_real_models: false
 slam:
   backend: rtabmap
-  use_depth: true
-  require_depth: true
-  map_resolution: 0.05
+  use_depth: false
+  require_depth: false
+  map_resolution: 0.03
   camera_intrinsics:
     width: 1920
     height: 1080
@@ -23,13 +23,19 @@ slam:
     executable: ./ORB_SLAM3/Examples/Monocular/mono_tum
     vocabulary_path: ./ORB_SLAM3/Vocabulary/ORBvoc.txt
     settings_path: ./ORB_SLAM3/Examples/Monocular/TUM1.yaml
+  update_every_n_frames: 10
 detection:
   model_name: models/grounding_dino_tiny
   use_real_model: true
-  device: cuda
-  box_threshold: 0.45
-  text_threshold: 0.35
-  prompt: chair . table . door . bed . sofa . fridge . sink . cabinet . lamp
+  device: cpu
+  box_threshold: 0.32
+  text_threshold: 0.2
+  prompt: wall . floor . ceiling . window . curtain . blind . carpet . rug . sofa
+    . couch . armchair . chair . table . coffee table . dining table . desk . tv .
+    monitor . laptop . bookshelf . shelf . cabinet . wardrobe . drawer . bed . pillow
+    . blanket . nightstand . lamp . chandelier . mirror . painting . plant . door
+    . handle . fridge . oven . microwave . sink . faucet . toilet . shower . bathtub
+    . washing machine . dishwasher . stove . trash bin . clock . fan . air conditioner
   stabilization_enabled: true
   track_iou_threshold: 0.45
   track_smoothing_alpha: 0.65
@@ -41,13 +47,12 @@ segmentation:
   model_type: vit_h
   checkpoint: models/sam/sam_vit_h_4b8939.pth
   use_real_model: true
-  device: cuda
+  device: cpu
 semantic:
   model_name: models/qwen2_vl_2b
   use_real_model: true
-  device: cuda
-  max_new_tokens: 120
-  room_stability_min_votes: 3
+  device: cpu
+  max_new_tokens: 180
   room_labels:
   - kitchen
   - bedroom
@@ -56,17 +61,33 @@ semantic:
   - hallway
   - office
   - dining_room
+  - laundry_room
+  - balcony
+  - storage_room
+  infer_every_n_frames: 3
+  room_stability_min_votes: 3
 scene_graph:
   include_room_nodes: true
-  relation_threshold_px: 60
+  relation_threshold_px: 45
 memory:
   backend: faiss
   embedding_model: sentence-transformers/all-MiniLM-L6-v2
-  top_k: 5
+  top_k: 10
 visualization:
   draw_masks: true
   draw_boxes: true
   export_graph_png: true
-  pointcloud_sample_step: 24
-  video_fps: 10
-  simulation3d_max_points: 18000
+  pointcloud_sample_step: 8
+  simulator_point_budget: 250000
+  video_fps: 30
+  simulation3d_max_points: 60000
+  simulation_profiles:
+  - name: fast
+    fps: 10
+    max_points: 15000
+  - name: balanced
+    fps: 14
+    max_points: 40000
+  - name: high
+    fps: 18
+    max_points: 90000

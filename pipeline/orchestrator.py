@@ -25,6 +25,7 @@ from visualization.scene_graph_viz import export_scene_graph_visuals
 from visualization.simulation_viz import (
     export_2d_simulation_video,
     export_3d_simulation_video,
+    export_frame_replay_video,
     export_overlay_video,
 )
 
@@ -44,7 +45,11 @@ class HomeWorldModelPipeline:
         # Keep only lightweight per-frame state in memory.
         self.states: List[FrameWorldState] = []
         self.semantic_infer_every_n_frames = max(1, int(cfg["semantic"].get("infer_every_n_frames", 1)))
+        self.room_stability_min_votes = max(1, int(cfg["semantic"].get("room_stability_min_votes", 3)))
         self._last_semantic: SemanticFrame | None = None
+        self._stable_room_label: str | None = None
+        self._room_switch_candidate: str | None = None
+        self._room_switch_votes = 0
 
     def initialize(self) -> None:
         frame_stride = int(self.cfg["system"].get("frame_stride", 1))
@@ -100,6 +105,7 @@ class HomeWorldModelPipeline:
                 self._last_semantic = semantics
             else:
                 semantics = self._reuse_semantic(self._last_semantic, detections)
+            semantics = self._stabilize_room_label(semantics)
             if "raw_text" not in semantics.attributes:
                 raise RuntimeError("Semantic output is not model-derived (missing raw_text from VLM response).")
             state = FrameWorldState(
@@ -181,6 +187,39 @@ class HomeWorldModelPipeline:
             attributes=attrs,
         )
 
+    def _stabilize_room_label(self, semantic: SemanticFrame) -> SemanticFrame:
+        incoming_room = semantic.room_label
+        attrs = dict(semantic.attributes)
+        attrs["raw_room_label"] = incoming_room
+
+        if self._stable_room_label is None:
+            self._stable_room_label = incoming_room
+            self._room_switch_candidate = None
+            self._room_switch_votes = 0
+        elif incoming_room == self._stable_room_label:
+            self._room_switch_candidate = None
+            self._room_switch_votes = 0
+        else:
+            if incoming_room == self._room_switch_candidate:
+                self._room_switch_votes += 1
+            else:
+                self._room_switch_candidate = incoming_room
+                self._room_switch_votes = 1
+            if self._room_switch_votes >= self.room_stability_min_votes:
+                self._stable_room_label = incoming_room
+                self._room_switch_candidate = None
+                self._room_switch_votes = 0
+                attrs["room_label_switched"] = True
+
+        attrs["stable_room_label"] = self._stable_room_label
+        attrs["room_switch_candidate"] = self._room_switch_candidate
+        attrs["room_switch_votes"] = self._room_switch_votes
+        return SemanticFrame(
+            room_label=self._stable_room_label or incoming_room,
+            caption=semantic.caption,
+            attributes=attrs,
+        )
+
     def _export_frame(self, frame_id: int, state: FrameWorldState) -> None:
         write_json(self.output_dirs['detections'] / f'frame_{frame_id:06d}.json', {'detections': to_jsonable(state.detections)})
         write_json(self.output_dirs['segments'] / f'frame_{frame_id:06d}.json', {'segments': to_jsonable(state.segments)})
@@ -223,6 +262,12 @@ class HomeWorldModelPipeline:
             output_mp4=self.output_dirs["viz"] / "overlay_preview.mp4",
             fps=int(self.cfg["visualization"].get("video_fps", 10)),
         )
+        if bool(self.cfg["visualization"].get("export_sim_replay", True)):
+            export_frame_replay_video(
+                frames_dir=self.output_dirs["frames"],
+                output_mp4=self.output_dirs["viz"] / "sim_replay.mp4",
+                fps=int(self.cfg["visualization"].get("video_fps", 10)),
+            )
         export_2d_simulation_video(
             occupancy_grid_npy=self.output_dirs["map"] / "occupancy_grid.npy",
             trajectory_json=self.output_dirs["map"] / "trajectory.json",
@@ -235,6 +280,7 @@ class HomeWorldModelPipeline:
             output_mp4=self.output_dirs["viz"] / "simulation_3d.mp4",
             fps=int(self.cfg["visualization"].get("video_fps", 10)),
             max_points=int(self.cfg["visualization"].get("simulation3d_max_points", 18000)),
+            semantics_dir=self.output_dirs["semantics"],
         )
         profiles = self.cfg["visualization"].get("simulation_profiles", [])
         for prof in profiles:
@@ -257,6 +303,7 @@ class HomeWorldModelPipeline:
                 output_mp4=self.output_dirs["viz"] / f"simulation_3d_{name}.mp4",
                 fps=fps,
                 max_points=max_points,
+                semantics_dir=self.output_dirs["semantics"],
             )
         export_pointcloud_simulator_previews(
             cloud_ply=self.output_dirs["map"] / "pointcloud_rgb.ply",

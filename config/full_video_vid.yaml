@@ -1,8 +1,8 @@
 system:
   run_name: phase1_home_world_model
   device: cuda
-  max_frames: 834
-  frame_stride: 3
+  max_frames: 84
+  frame_stride: 30
   strict_real_models: true
 slam:
   backend: rtabmap
@@ -60,5 +60,5 @@ visualization:
   draw_boxes: true
   export_graph_png: true
   pointcloud_sample_step: 24
-  video_fps: 10
+  video_fps: 1
   simulation3d_max_points: 18000

@@ -4,6 +4,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import os
+import json
 from typing import Dict
 
 import cv2
@@ -35,6 +36,7 @@ class RTABMapBackend(SlamBackend):
         self.output_name = "rtabmap"
         self.last_poses: list[Dict[str, float]] = []
         self.frames_written = 0
+        self._command_log: list[Dict[str, object]] = []
 
     def initialize(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -55,6 +57,7 @@ class RTABMapBackend(SlamBackend):
         self.init_error = None
         self.frames_written = 0
         self.last_poses = []
+        self._command_log = []
 
     def process_frame(self, packet: FramePacket) -> SlamFrameResult:
         if not self.is_real_backend:
@@ -206,6 +209,7 @@ class RTABMapBackend(SlamBackend):
             folder = self.sequence_dir / sub
             for fp in folder.glob("*.png"):
                 fp.unlink(missing_ok=True)
+        (self.sequence_dir / "rtabmap_association.txt").unlink(missing_ok=True)
 
     def _clear_output_folder(self) -> None:
         for name in (
@@ -214,6 +218,7 @@ class RTABMapBackend(SlamBackend):
             "slam_cloud.ply",
             "slam_map.pgm",
             "slam_map.yaml",
+            "rtabmap_command_log.json",
         ):
             (self.output_dir / name).unlink(missing_ok=True)
 
@@ -283,6 +288,7 @@ class RTABMapBackend(SlamBackend):
         ]
         env = dict(os.environ)
         env["QT_QPA_PLATFORM"] = "offscreen"
+        self._record_command(cmd)
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
         if result.returncode != 0:
             raise RuntimeError(
@@ -339,16 +345,21 @@ class RTABMapBackend(SlamBackend):
             str(db_path),
         ]
         for cmd in (cloud_cmd, map_cmd):
+            self._record_command(cmd)
             result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             if result.returncode != 0:
                 raise RuntimeError(f"RTAB-Map export failed: {result.stderr or result.stdout}")
+        self._write_command_log()
         cloud_file = self._pick_first_existing("slam_cloud*.ply")
         map_file = self._pick_first_existing("slam_map*.pgm")
         yaml_file = self._pick_first_existing("slam_map*.yaml")
         if cloud_file is None:
             raise RuntimeError("RTAB-Map export did not produce any cloud PLY file.")
         if map_file is None or yaml_file is None:
-            map_file, yaml_file = self._build_occupancy_from_cloud(cloud_file)
+            raise RuntimeError(
+                "RTAB-Map export did not produce occupancy map files (PGM/YAML). "
+                "No synthetic occupancy reconstruction is allowed."
+            )
         return {
             "cloud_ply": str(cloud_file),
             "occupancy_pgm": str(map_file),
@@ -359,60 +370,11 @@ class RTABMapBackend(SlamBackend):
         matches = sorted(self.output_dir.glob(pattern))
         return matches[0] if matches else None
 
-    def _build_occupancy_from_cloud(self, cloud_file: Path) -> tuple[Path, Path]:
-        points = []
-        with cloud_file.open("r", encoding="utf-8") as f:
-            in_data = False
-            for raw in f:
-                line = raw.strip()
-                if not in_data:
-                    if line == "end_header":
-                        in_data = True
-                    continue
-                if not line:
-                    continue
-                parts = line.split()
-                if len(parts) < 3:
-                    continue
-                try:
-                    x = float(parts[0])
-                    z = float(parts[2])
-                except ValueError:
-                    continue
-                if np.isfinite(x) and np.isfinite(z):
-                    points.append((x, z))
+    def _record_command(self, cmd: list[str]) -> None:
+        self._command_log.append({"argv": cmd})
 
-        if not points:
-            raise RuntimeError("Cannot build occupancy map from cloud: no valid points found.")
-
-        pts = np.asarray(points, dtype=np.float32)
-        min_x, min_z = pts.min(axis=0)
-        max_x, max_z = pts.max(axis=0)
-        res = max(float(self.resolution), 1e-3)
-        width = max(int(np.ceil((max_x - min_x) / res)) + 1, 32)
-        height = max(int(np.ceil((max_z - min_z) / res)) + 1, 32)
-
-        grid = np.full((height, width), 205, dtype=np.uint8)
-        ix = np.clip(((pts[:, 0] - min_x) / res).astype(np.int32), 0, width - 1)
-        iz = np.clip(((pts[:, 1] - min_z) / res).astype(np.int32), 0, height - 1)
-        grid[height - 1 - iz, ix] = 0
-
-        occ = (grid == 0).astype(np.uint8)
-        occ = cv2.dilate(occ, np.ones((3, 3), dtype=np.uint8), iterations=1)
-        grid[occ > 0] = 0
-
-        map_file = self.output_dir / "slam_map.pgm"
-        yaml_file = self.output_dir / "slam_map.yaml"
-        cv2.imwrite(str(map_file), grid)
-        yaml_file.write_text(
-            (
-                f"image: {map_file.name}\n"
-                f"resolution: {res}\n"
-                f"origin: [{min_x:.6f}, {min_z:.6f}, 0.0]\n"
-                "negate: 0\n"
-                "occupied_thresh: 0.65\n"
-                "free_thresh: 0.196\n"
-            ),
-            encoding="utf-8",
-        )
-        return map_file, yaml_file
+    def _write_command_log(self) -> None:
+        if not self._command_log:
+            return
+        out = self.output_dir / "rtabmap_command_log.json"
+        out.write_text(json.dumps({"commands": self._command_log}, indent=2), encoding="utf-8")

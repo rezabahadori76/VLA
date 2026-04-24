@@ -8,7 +8,7 @@ import numpy as np
 from tqdm import tqdm
 
 from common.logging_utils import JsonlLogger, to_jsonable
-from common.types import FrameWorldState
+from common.types import FrameWorldState, SemanticFrame
 from detection.grounding_dino_detector import GroundingDinoDetector
 from memory.vector_store import FaissMemoryStore
 from pipeline.io_utils import iter_video_frames, write_json
@@ -39,6 +39,7 @@ class HomeWorldModelPipeline:
         self.semantic = Qwen2VLSemanticModule(cfg['semantic'])
         self.scene_graph_builder = SceneGraphBuilder(cfg['scene_graph'])
         self.memory = FaissMemoryStore(cfg['memory']['embedding_model'], int(cfg['memory'].get('top_k', 5)))
+        # Keep only lightweight per-frame state in memory.
         self.states: List[FrameWorldState] = []
 
     def initialize(self) -> None:
@@ -102,9 +103,41 @@ class HomeWorldModelPipeline:
                 semantics=semantics,
             )
             self.states.append(state)
-            self.memory.add_state(state)
             self._export_frame(packet.frame_id, state)
-            self.logger.log('frame_processed', to_jsonable(state))
+            render_perception_overlay(
+                states=[state],
+                frames_dir=self.output_dirs['frames'],
+                output_dir=self.output_dirs['viz'] / 'overlays',
+                draw_masks=bool(self.cfg['visualization'].get('draw_masks', True)),
+                draw_boxes=bool(self.cfg['visualization'].get('draw_boxes', True)),
+            )
+
+            # Drop heavy fields (segments, raw_text attributes) from persistent in-memory state.
+            compact_state = FrameWorldState(
+                frame_id=state.frame_id,
+                timestamp=state.timestamp,
+                pose=state.pose,
+                detections=state.detections,
+                segments=[],
+                semantics=SemanticFrame(
+                    room_label=state.semantics.room_label,
+                    caption=state.semantics.caption,
+                    attributes={},
+                ),
+            )
+            self.states[-1] = compact_state
+            self.memory.add_state(compact_state)
+            self.logger.log(
+                'frame_processed',
+                {
+                    'frame_id': compact_state.frame_id,
+                    'timestamp': compact_state.timestamp,
+                    'pose': to_jsonable(compact_state.pose),
+                    'detections_count': len(compact_state.detections),
+                    'segments_count': len(segments),
+                    'room': compact_state.semantics.room_label,
+                },
+            )
             processed = packet.frame_id + 1
             remaining = max(expected_processed - processed, 0)
             progress.update(1)
@@ -161,13 +194,6 @@ class HomeWorldModelPipeline:
 
     def _export_visuals(self, scene_graph, slam_summary: Dict[str, Any]) -> None:
         export_map_visuals(self.output_dirs['map'] / 'occupancy_grid.npy', self.output_dirs['viz'] / 'slam_map.png')
-        render_perception_overlay(
-            states=self.states,
-            frames_dir=self.output_dirs['frames'],
-            output_dir=self.output_dirs['viz'] / 'overlays',
-            draw_masks=bool(self.cfg['visualization'].get('draw_masks', True)),
-            draw_boxes=bool(self.cfg['visualization'].get('draw_boxes', True)),
-        )
         export_scene_graph_visuals(
             scene_graph_path=self.output_dirs['scene_graph'] / 'scene_graph.json',
             output_png=self.output_dirs['viz'] / 'scene_graph.png',

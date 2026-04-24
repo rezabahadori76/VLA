@@ -71,7 +71,7 @@ class GroundingDinoDetector:
         if self.device == "cuda" and torch.cuda.is_available():
             inputs = {k: v.to("cuda") for k, v in inputs.items()}
 
-        with torch.no_grad():
+        with torch.inference_mode():
             outputs = self.model(**inputs)
 
         results = self.processor.post_process_grounded_object_detection(
@@ -96,6 +96,8 @@ class GroundingDinoDetector:
                     bbox_xyxy=(x1, y1, x2, y2),
                 )
             )
+        del outputs
+        del inputs
         return detections
 
     def status(self) -> Dict[str, Any]:

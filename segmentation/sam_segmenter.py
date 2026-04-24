@@ -4,6 +4,7 @@ from typing import Any, Dict, List
 
 import cv2
 import numpy as np
+import torch
 from pathlib import Path
 
 from common.types import Detection, FramePacket, SegmentationMask
@@ -73,26 +74,29 @@ class SAMSegmenter:
 
     def _segment_real(self, packet: FramePacket, detections: List[Detection]) -> List[SegmentationMask]:
         rgb = cv2.cvtColor(packet.rgb, cv2.COLOR_BGR2RGB)
-        self.predictor.set_image(rgb)
-
         outputs: List[SegmentationMask] = []
-        for det in detections:
-            box = np.array(det.bbox_xyxy, dtype=np.float32)
-            masks, scores, _ = self.predictor.predict(
-                point_coords=None,
-                point_labels=None,
-                box=box[None, :],
-                multimask_output=False,
-            )
-            mask = masks[0].astype(np.uint8)
-            outputs.append(
-                SegmentationMask(
-                    label=det.label,
-                    score=float(scores[0]),
-                    mask_rle=_binary_mask_to_rle(mask),
-                    bbox_xyxy=det.bbox_xyxy,
+        with torch.inference_mode():
+            self.predictor.set_image(rgb)
+
+            for det in detections:
+                box = np.array(det.bbox_xyxy, dtype=np.float32)
+                masks, scores, _ = self.predictor.predict(
+                    point_coords=None,
+                    point_labels=None,
+                    box=box[None, :],
+                    multimask_output=False,
                 )
-            )
+                mask = masks[0].astype(np.uint8)
+                outputs.append(
+                    SegmentationMask(
+                        label=det.label,
+                        score=float(scores[0]),
+                        mask_rle=_binary_mask_to_rle(mask),
+                        bbox_xyxy=det.bbox_xyxy,
+                    )
+                )
+        if hasattr(self.predictor, "reset_image"):
+            self.predictor.reset_image()
         return outputs
 
     def status(self) -> Dict[str, Any]:

@@ -101,13 +101,15 @@ class Qwen2VLSemanticModule:
         if self.device == "cuda" and torch.cuda.is_available():
             inputs = {k: v.to("cuda") for k, v in inputs.items()}
 
-        with torch.no_grad():
+        with torch.inference_mode():
             generated = self.model.generate(
                 **inputs,
                 max_new_tokens=self.max_new_tokens,
                 do_sample=False,
             )
         text = self.processor.batch_decode(generated, skip_special_tokens=True)[0]
+        del generated
+        del inputs
         parsed = self._safe_parse_json(text)
         if not parsed:
             raise RuntimeError("Qwen2-VL output is not valid JSON for semantic scene understanding.")

@@ -118,12 +118,15 @@ class HomeWorldModelPipeline:
             )
             self.states.append(state)
             self._export_frame(packet.frame_id, state)
+            viz_cfg = self.cfg["visualization"]
             render_perception_overlay(
                 states=[state],
                 frames_dir=self.output_dirs['frames'],
                 output_dir=self.output_dirs['viz'] / 'overlays',
-                draw_masks=bool(self.cfg['visualization'].get('draw_masks', True)),
-                draw_boxes=bool(self.cfg['visualization'].get('draw_boxes', True)),
+                draw_masks=bool(viz_cfg.get('draw_masks', True)),
+                draw_boxes=bool(viz_cfg.get('draw_boxes', True)),
+                box_line_thickness=int(viz_cfg.get('overlay_box_thickness', 1)),
+                label_font_thickness=int(viz_cfg.get('overlay_label_thickness', 1)),
             )
 
             # Drop heavy fields (segments, raw_text attributes) from persistent in-memory state.

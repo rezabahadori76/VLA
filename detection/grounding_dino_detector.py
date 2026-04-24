@@ -35,6 +35,7 @@ class GroundingDinoDetector:
         self.track_max_missed = max(0, int(cfg.get("track_max_missed", 3)))
         self.track_score_decay = float(cfg.get("track_score_decay", 0.92))
         self.track_min_score = float(cfg.get("track_min_score", 0.2))
+        self.min_score = float(cfg.get("min_score", 0.0))
 
         self.processor = None
         self.model = None
@@ -121,8 +122,13 @@ class GroundingDinoDetector:
         del outputs
         del inputs
         if not self.stabilization_enabled:
+            return self._filter_by_min_score(detections)
+        return self._filter_by_min_score(self._stabilize_detections(detections))
+
+    def _filter_by_min_score(self, detections: List[Detection]) -> List[Detection]:
+        if self.min_score <= 0.0:
             return detections
-        return self._stabilize_detections(detections)
+        return [d for d in detections if d.score >= self.min_score]
 
     def _stabilize_detections(self, detections: List[Detection]) -> List[Detection]:
         unmatched_track_ids = set(self._tracks.keys())

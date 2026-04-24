@@ -20,6 +20,7 @@ from visualization.map_viz import export_map_visuals
 from visualization.memory_demo import export_memory_demo
 from visualization.overlay import render_perception_overlay
 from visualization.pointcloud_viz import export_pointcloud_simulator_previews
+from visualization.home_design_viz import export_home_design
 from visualization.scene_graph_viz import export_scene_graph_visuals
 from visualization.simulation_viz import (
     export_2d_simulation_video,
@@ -42,6 +43,8 @@ class HomeWorldModelPipeline:
         self.memory = FaissMemoryStore(cfg['memory']['embedding_model'], int(cfg['memory'].get('top_k', 5)))
         # Keep only lightweight per-frame state in memory.
         self.states: List[FrameWorldState] = []
+        self.semantic_infer_every_n_frames = max(1, int(cfg["semantic"].get("infer_every_n_frames", 1)))
+        self._last_semantic: SemanticFrame | None = None
 
     def initialize(self) -> None:
         frame_stride = int(self.cfg["system"].get("frame_stride", 1))
@@ -92,7 +95,11 @@ class HomeWorldModelPipeline:
             slam_result = self.slam.process_frame(packet)
             detections = self.detector.detect(packet)
             segments = self.segmenter.segment(packet, detections)
-            semantics = self.semantic.infer(packet, detections)
+            if self._last_semantic is None or packet.frame_id % self.semantic_infer_every_n_frames == 0:
+                semantics = self.semantic.infer(packet, detections)
+                self._last_semantic = semantics
+            else:
+                semantics = self._reuse_semantic(self._last_semantic, detections)
             if "raw_text" not in semantics.attributes:
                 raise RuntimeError("Semantic output is not model-derived (missing raw_text from VLM response).")
             state = FrameWorldState(
@@ -162,6 +169,17 @@ class HomeWorldModelPipeline:
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         cap.release()
         return total if total > 0 else None
+
+    def _reuse_semantic(self, previous: SemanticFrame, detections) -> SemanticFrame:
+        attrs = dict(previous.attributes)
+        attrs["objects"] = [d.label for d in detections]
+        attrs["raw_text"] = attrs.get("raw_text", "[reused semantic]")
+        attrs["semantic_reused"] = True
+        return SemanticFrame(
+            room_label=previous.room_label,
+            caption=previous.caption,
+            attributes=attrs,
+        )
 
     def _export_frame(self, frame_id: int, state: FrameWorldState) -> None:
         write_json(self.output_dirs['detections'] / f'frame_{frame_id:06d}.json', {'detections': to_jsonable(state.detections)})
@@ -245,6 +263,12 @@ class HomeWorldModelPipeline:
             output_realistic_png=self.output_dirs["viz"] / "simulator_realistic.png",
             output_heatmap_png=self.output_dirs["viz"] / "simulator_heatmap.png",
             point_budget=int(self.cfg["visualization"].get("simulator_point_budget", 250000)),
+        )
+        export_home_design(
+            states=self.states,
+            output_png=self.output_dirs["viz"] / "home_design_layout.png",
+            output_json=self.output_dirs["viz"] / "home_design_layout.json",
+            canvas_size=int(self.cfg["visualization"].get("home_design_canvas_size", 1200)),
         )
         export_memory_demo(self.memory, self.output_dirs['memory'] / 'retrieval_demo.json', [
             'Where is the kitchen?',

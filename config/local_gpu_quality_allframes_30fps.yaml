@@ -1,0 +1,85 @@
+system:
+  run_name: phase1_home_world_model_cpu_quality
+  device: cuda
+  max_frames: 1000000
+  frame_stride: 1
+  strict_real_models: false
+slam:
+  backend: rtabmap
+  use_depth: false
+  require_depth: false
+  update_every_n_frames: 10
+  map_resolution: 0.03
+  camera_intrinsics:
+    width: 1920
+    height: 1080
+    fx: 1000.0
+    fy: 1000.0
+    cx: 960.0
+    cy: 540.0
+  rtabmap:
+    executable: /workspace/phase1/third_party/rtabmap/build/bin/rtabmap-rgbd_dataset
+    db_path: outputs/rtabmap.db
+  orbslam3:
+    executable: ./ORB_SLAM3/Examples/Monocular/mono_tum
+    vocabulary_path: ./ORB_SLAM3/Vocabulary/ORBvoc.txt
+    settings_path: ./ORB_SLAM3/Examples/Monocular/TUM1.yaml
+detection:
+  model_name: models/grounding_dino_tiny
+  use_real_model: true
+  device: cuda
+  box_threshold: 0.32
+  text_threshold: 0.2
+  prompt: wall . floor . ceiling . window . curtain . blind . carpet . rug . sofa
+    . couch . armchair . chair . table . coffee table . dining table . desk . tv .
+    monitor . laptop . bookshelf . shelf . cabinet . wardrobe . drawer . bed . pillow
+    . blanket . nightstand . lamp . chandelier . mirror . painting . plant . door
+    . handle . fridge . oven . microwave . sink . faucet . toilet . shower . bathtub
+    . washing machine . dishwasher . stove . trash bin . clock . fan . air conditioner
+segmentation:
+  model_type: vit_h
+  checkpoint: models/sam/sam_vit_h_4b8939.pth
+  use_real_model: true
+  device: cuda
+semantic:
+  model_name: models/qwen2_vl_2b
+  use_real_model: true
+  device: cuda
+  max_new_tokens: 180
+  infer_every_n_frames: 2
+  room_labels:
+  - kitchen
+  - bedroom
+  - living_room
+  - bathroom
+  - hallway
+  - office
+  - dining_room
+  - laundry_room
+  - balcony
+  - storage_room
+scene_graph:
+  include_room_nodes: true
+  relation_threshold_px: 45
+memory:
+  backend: faiss
+  embedding_model: sentence-transformers/all-MiniLM-L6-v2
+  top_k: 10
+visualization:
+  draw_masks: true
+  draw_boxes: true
+  export_graph_png: true
+  pointcloud_sample_step: 8
+  simulator_point_budget: 250000
+  video_fps: 30
+  simulation3d_max_points: 60000
+  simulation_profiles:
+  - name: fast
+    fps: 10
+    max_points: 15000
+  - name: balanced
+    fps: 14
+    max_points: 40000
+  - name: high
+    fps: 18
+    max_points: 90000

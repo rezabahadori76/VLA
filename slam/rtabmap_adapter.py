@@ -22,12 +22,14 @@ class RTABMapBackend(SlamBackend):
         resolution: float,
         camera_intrinsics: Dict[str, float] | None = None,
         require_depth: bool = True,
+        update_every_n_frames: int = 1,
     ):
         self.executable = executable
         self.db_path = Path(db_path)
         self.resolution = resolution
         self.camera_intrinsics = camera_intrinsics or {}
         self.require_depth = require_depth
+        self.update_every_n_frames = max(1, int(update_every_n_frames))
 
         self.is_real_backend = False
         self.init_error: str | None = None
@@ -50,6 +52,7 @@ class RTABMapBackend(SlamBackend):
         self.sequence_dir.mkdir(parents=True, exist_ok=True)
         (self.sequence_dir / "rgb_sync").mkdir(parents=True, exist_ok=True)
         (self.sequence_dir / "depth_sync").mkdir(parents=True, exist_ok=True)
+        (self.sequence_dir / "depth_sync_preview").mkdir(parents=True, exist_ok=True)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self._clear_sequence_folder()
         self._clear_output_folder()
@@ -88,18 +91,26 @@ class RTABMapBackend(SlamBackend):
         if packet.depth is not None:
             depth_frame = self._prepare_depth_frame(packet.depth)
             cv2.imwrite(str(depth_path), depth_frame)
+            self._write_depth_preview(depth_frame, stamp)
         elif not self.require_depth:
             # RGB-only fallback: synthesize a pseudo-depth image so the
             # RTAB-Map RGB-D dataset tool can still run.
             pseudo_depth = self._prepare_depth_frame(packet.rgb)
             cv2.imwrite(str(depth_path), pseudo_depth)
+            self._write_depth_preview(pseudo_depth, stamp)
 
         self.frames_written += 1
-        try:
-            self._update_trajectory(force=True)
-        except RuntimeError:
-            if self.require_depth:
-                raise
+        should_refresh_traj = self.frames_written == 1 or (self.frames_written % self.update_every_n_frames == 0)
+        if should_refresh_traj:
+            try:
+                self._update_trajectory(force=True)
+            except RuntimeError:
+                if self.require_depth:
+                    raise
+                self._append_fallback_pose(packet)
+                self.fallback_active = True
+        elif not self.last_poses and not self.fallback_poses:
+            # Keep a pose stream available between sparse trajectory refreshes.
             self._append_fallback_pose(packet)
             self.fallback_active = True
 
@@ -245,6 +256,7 @@ class RTABMapBackend(SlamBackend):
             "db_path": str(self.db_path),
             "require_depth": self.require_depth,
             "fallback_active": self.fallback_active,
+            "update_every_n_frames": self.update_every_n_frames,
         }
 
     def _write_calibration_file(self) -> None:
@@ -287,7 +299,7 @@ class RTABMapBackend(SlamBackend):
         calib_path.write_text(calib_text, encoding="utf-8")
 
     def _clear_sequence_folder(self) -> None:
-        for sub in ("rgb_sync", "depth_sync"):
+        for sub in ("rgb_sync", "depth_sync", "depth_sync_preview"):
             folder = self.sequence_dir / sub
             for fp in folder.glob("*.png"):
                 fp.unlink(missing_ok=True)
@@ -311,6 +323,11 @@ class RTABMapBackend(SlamBackend):
         depth_u8 = cv2.GaussianBlur(depth_u8, (5, 5), 0)
         depth_u16 = cv2.normalize(depth_u8, None, 400, 4500, cv2.NORM_MINMAX).astype("uint16")
         return depth_u16
+
+    def _write_depth_preview(self, depth_u16: "cv2.typing.MatLike", stamp: str) -> None:
+        preview_path = self.sequence_dir / "depth_sync_preview" / stamp
+        depth_8 = cv2.normalize(depth_u16, None, 0, 255, cv2.NORM_MINMAX).astype("uint8")
+        cv2.imwrite(str(preview_path), depth_8)
 
     def _sync_intrinsics_with_frame(self, rgb_frame) -> None:
         h, w = rgb_frame.shape[:2]

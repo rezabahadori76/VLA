@@ -20,6 +20,7 @@ class SlamModule:
                 resolution=resolution,
                 camera_intrinsics=cfg.get("camera_intrinsics", {}),
                 require_depth=bool(cfg.get("require_depth", True)),
+                update_every_n_frames=int(cfg.get("update_every_n_frames", 1)),
             )
         elif backend == "orbslam3":
             ocfg = cfg.get("orbslam3", {})
